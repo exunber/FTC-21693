@@ -1,0 +1,1016 @@
+package org.firstinspires.ftc.teamcode.Auto;
+
+import com.qualcomm.robotcore.eventloop.opmode.Autonomous;
+import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
+import com.qualcomm.robotcore.hardware.DcMotor;
+import com.qualcomm.robotcore.hardware.DcMotorEx;
+import com.qualcomm.robotcore.hardware.Servo;
+import com.qualcomm.robotcore.hardware.IMU;
+import com.qualcomm.robotcore.hardware.PIDFCoefficients;
+import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
+import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
+import org.firstinspires.ftc.robotcore.external.navigation.YawPitchRollAngles;
+
+// Limelight imports for auto-aim
+import com.qualcomm.hardware.limelightvision.LLResult;
+import com.qualcomm.hardware.limelightvision.LLResultTypes;
+import com.qualcomm.hardware.limelightvision.Limelight3A;
+import org.firstinspires.ftc.robotcore.external.navigation.Pose3D;
+import java.util.List;
+
+@Autonomous(name = "red1", group = "Competition")
+public class red1_Copy extends LinearOpMode {
+
+    // Drive motors
+    private DcMotor fl, fr, bl, br = null;
+
+    // Other motors
+    private DcMotor intake, transfer = null;
+    
+    private DcMotorEx shooter = null;
+
+    // Servos
+    Servo hold;
+
+    // Limelight camera for auto-aim
+    private Limelight3A limelight;
+
+    // IMU
+    //IMU imu;
+
+    // Robot specifications
+    private static final double MOTOR_PPR = 28.0;           // Pulses per revolution
+    private static final double GEAR_RATIO = 19.72;         // Gear ratio
+    private static final double WHEEL_DIAMETER_MM = 86.0;  // Wheel diameter in mm
+    private static final double COUNTS_PER_MOTOR_REV = MOTOR_PPR * GEAR_RATIO;  // ~88.9
+    private static final double WHEEL_CIRCUMFERENCE_MM = WHEEL_DIAMETER_MM * Math.PI;  // ~270.18 mm
+    private static final double COUNTS_PER_MM = COUNTS_PER_MOTOR_REV / WHEEL_CIRCUMFERENCE_MM;  // ~0.329 counts/mm
+    private static final double TRACK_WIDTH_MM = 381.0; // center-to-center of wheels
+    private static final double COUNTS_PER_DEGREE = (Math.PI * TRACK_WIDTH_MM / 360.0) * COUNTS_PER_MM;
+
+    // PID parameters for driving
+    private static final double DRIVE_SPEED = 0.55;
+    private static final double TURN_SPEED = 0.6;
+    private static final double HEADING_THRESHOLD = 3.0;  // degrees
+
+    // Shooter parameters
+    private static final int SHOOTER_TARGET_VELOCITY = 1500;
+    private static final int SHOOTER_VELOCITY_TOLERANCE = 75;
+    private static final long MIN_RECOVERY_TIME_MS = 1000;
+
+        // Auto-alignment parameters
+    private static final double ALIGNMENT_RANGE = 30.0;
+    private static final double ALIGNMENT_TOLERANCE = 5.5;  // Increased to prevent overshooting
+    private static final double MIN_ROTATION_POWER = 0.08;  // Reduced minimum power
+    private static final double MAX_ROTATION_POWER = 0.35;  // Reduced maximum power
+    private static final double Kp = 0.025;  // Reduced proportional gain for smoother control
+
+    // Distance-to-RPM lookup table (from telop)
+    public static final double[][] DISTANCE_RPM_TABLE = {
+        {40, 1050},
+        {50, 1200},
+        {70, 1450},
+        {100, 1700},
+        {120, 2200}
+    };
+    
+    public static final double DEFAULT_RPM = 2430.0;
+
+    // Alliance selection
+    private boolean isRedAlliance = true;  // Will be set based on gamepad input (x for red b for blue)
+    private int allianceMultiplier = 1;     // 1 for red, -1 for blue
+
+    // Shooter state for background control
+    private boolean shooterEnabled = false;
+
+    @Override
+    public void runOpMode() {
+
+        telemetry.addData("Status", "Initializing...");
+        telemetry.update();
+
+        // --- HARDWARE MAPPING ---
+        fl = hardwareMap.get(DcMotor.class, "fl");
+        fr = hardwareMap.get(DcMotor.class, "fr");
+        bl = hardwareMap.get(DcMotor.class, "bl");
+        br = hardwareMap.get(DcMotor.class, "br");
+
+        intake = hardwareMap.get(DcMotor.class, "intake");
+        shooter = hardwareMap.get(DcMotorEx.class, "shooter");
+        transfer = hardwareMap.get(DcMotor.class, "transfer");
+
+        hold = hardwareMap.get(Servo.class, "hold");
+
+        // Initialize Limelight
+        limelight = hardwareMap.get(Limelight3A.class, "limelight");
+        limelight.setPollRateHz(100);
+        limelight.pipelineSwitch(0);
+        limelight.start();
+
+        // Initialize IMU
+       /* imu = hardwareMap.get(IMU.class, "imu");
+        IMU.Parameters imuParameters = new IMU.Parameters(
+                new RevHubOrientationOnRobot(
+                        RevHubOrientationOnRobot.LogoFacingDirection.UP,
+                        RevHubOrientationOnRobot.UsbFacingDirection.FORWARD
+                )
+        );
+        imu.initialize(imuParameters);
+    */
+        // --- MOTOR DIRECTION ---
+        fl.setDirection(DcMotor.Direction.FORWARD);
+        bl.setDirection(DcMotor.Direction.FORWARD);
+        fr.setDirection(DcMotor.Direction.REVERSE);
+        br.setDirection(DcMotor.Direction.REVERSE);
+        intake.setDirection(DcMotor.Direction.FORWARD);
+        shooter.setDirection(DcMotor.Direction.FORWARD);
+
+        // --- MOTOR BEHAVIORS ---
+        fl.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        fr.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        bl.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        br.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        transfer.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        intake.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        shooter.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+
+        // Configure shooter PIDF
+        PIDFCoefficients shooterPIDF = new PIDFCoefficients(53, 0.02, 3, 11);
+        shooter.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER, shooterPIDF);
+        shooter.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+
+        // Set drive motors to use encoders
+        fl.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
+        fr.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
+        bl.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
+        br.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
+        shooter.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
+
+        fl.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+        fr.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+        bl.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+        br.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+        shooter.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+
+        
+        // Other motors without encoders
+        intake.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
+        transfer.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
+
+        // Initialize servo
+        //hold.setPosition(0);
+
+        // Reset IMU
+       // imu.resetYaw();
+
+        telemetry.addData("Status", "Initialized. Ready to run!");
+        telemetry.update();
+
+        // Alliance selection
+        selectAlliance();
+
+        waitForStart();
+
+        if (opModeIsActive()) {
+
+            //shoot preloads with auto-aim
+            hold.setPosition(0);
+            driveDistance(-750, DRIVE_SPEED);
+            
+            // Use auto-aim for shooting
+            autoAimAndShoot();
+            autoAimAndShoot();
+            autoAimAndShoot();
+
+           /* driveDistance(-200, DRIVE_SPEED);*/
+
+            //drive to stack
+            turnDegrees(265 * allianceMultiplier, DRIVE_SPEED);
+            strafeDistance(-300 * allianceMultiplier, DRIVE_SPEED * 1.5);
+            hold.setPosition(.62);
+            intake.setPower(1.0);
+            transfer.setPower(1.0);
+            
+            driveDistance(-650, DRIVE_SPEED);
+            //sleep(500);
+            intake.setPower(.5);
+
+            transfer.setPower(0);
+            driveDistance(400, DRIVE_SPEED);
+          strafeDistance(200 * allianceMultiplier, DRIVE_SPEED * 1.5);
+            turnDegrees(-265 * allianceMultiplier, DRIVE_SPEED);
+
+            // Use auto-aim for second set of shots
+            hold.setPosition(0);
+            sleep(100);
+            autoAimAndShoot();
+            autoAimAndShoot();
+            autoAimAndShoot();
+
+            strafeDistance(400 * allianceMultiplier, DRIVE_SPEED * 1.5);
+            hold.setPosition(.62);
+
+            sleep(9999);
+
+            telemetry.addData("Status", "Autonomous Complete");
+            sleep(99999);
+            telemetry.update();
+        }
+        
+        // Stop Limelight when done
+        limelight.stop();
+    }
+    
+    /**
+     * Auto-aim using Limelight and shoot with distance-based RPM calculation
+     * This combines the auto-alignment and shooting logic from telop
+     */
+    private void autoAimAndShoot() {
+        // Step 1: Auto-align to target
+        autoAlign();
+        
+        // Step 2: Calculate target velocity based on distance
+        LLResult result = limelight.getLatestResult();
+        double targetDistanceMeters = getDistanceToTarget(result);
+        double targetDistanceInches = targetDistanceMeters * 39.3701; // Convert meters to inches
+        double targetVelocity = DEFAULT_RPM;
+        
+        if (targetDistanceMeters > 0) {
+            targetVelocity = getRpmForDistance(targetDistanceInches);
+            telemetry.addData("Distance", "%.1f in (%.2f m)", targetDistanceInches, targetDistanceMeters);
+        } else {
+            telemetry.addData("Distance", "No target (using default RPM)");
+        }
+        telemetry.addData("Target RPM", "%.0f", targetVelocity);
+        telemetry.update();
+        
+        // Step 3: Fire shot with calculated velocity
+        fireSingleShotWithVelocity(targetVelocity);
+    }
+    
+    /**
+     * Auto-align the robot to the target using Limelight
+     * Rotates the robot until the target is centered
+     */
+    private void autoAlign() {
+        long alignStartTime = System.currentTimeMillis();
+        long maxAlignTime = 2000; // Maximum 1.5 seconds for alignment
+        
+        // First check if we even need to align
+        LLResult initialResult = limelight.getLatestResult();
+        if (initialResult == null || !initialResult.isValid()) {
+            telemetry.addData("Auto-Align", "No target found - skipping alignment");
+            telemetry.update();
+            sleep(200);
+            return;
+        }
+        
+        double initialTx = initialResult.getTx();
+        if (Math.abs(initialTx) <= ALIGNMENT_TOLERANCE) {
+            telemetry.addData("Auto-Align", "Already aligned! (tx=%.2f)", initialTx);
+            telemetry.update();
+            sleep(200);
+            return;
+        }
+        
+        telemetry.addData("Auto-Align", "Starting alignment (tx=%.2f)", initialTx);
+        telemetry.update();
+        
+        while (opModeIsActive() && (System.currentTimeMillis() - alignStartTime) < maxAlignTime) {
+            LLResult result = limelight.getLatestResult();
+            
+            if (result == null || !result.isValid()) {
+                telemetry.addData("Auto-Align", "Lost target");
+                telemetry.update();
+                break;
+            }
+            
+            double tx = result.getTx(); // Horizontal offset from crosshair
+            
+            // Check if aligned
+            if (Math.abs(tx) <= ALIGNMENT_TOLERANCE) {
+                telemetry.addData("Auto-Align", "LOCKED! (tx=%.2f)", tx);
+                telemetry.update();
+                stopDrive();
+                sleep(100); // Brief pause to stabilize
+                break;
+            }
+            
+            // Calculate rotation correction using proportional control
+            // CHANGED: Removed negative sign - try positive feedback
+            // If robot turns wrong way, change this back to: -tx * Kp
+            double rotationCorrection = tx * Kp;
+            
+            // Apply minimum power to overcome friction
+            if (Math.abs(tx) > ALIGNMENT_TOLERANCE) {
+                if (rotationCorrection > 0) {
+                    rotationCorrection = Math.max(rotationCorrection, MIN_ROTATION_POWER);
+                } else {
+                    rotationCorrection = Math.min(rotationCorrection, -MIN_ROTATION_POWER);
+                }
+            }
+            
+            // Limit maximum rotation power
+            rotationCorrection = Math.max(-MAX_ROTATION_POWER, 
+                                          Math.min(MAX_ROTATION_POWER, rotationCorrection));
+            
+            // Apply rotation to motors (positive rx = rotate right)
+            fl.setPower(-rotationCorrection);
+            fr.setPower(rotationCorrection);
+            bl.setPower(-rotationCorrection);
+            br.setPower(rotationCorrection);
+            
+            telemetry.addData("Auto-Align", "Aligning...");
+            telemetry.addData("Target X (tx)", "%.2f°", tx);
+            telemetry.addData("Rotation Power", "%.3f", rotationCorrection);
+            telemetry.addData("Direction", tx > 0 ? "Target is RIGHT" : "Target is LEFT");
+            telemetry.update();
+            
+            sleep(20);
+        }
+        
+        stopDrive();
+        sleep(100); // Brief pause after alignment
+    }
+    
+    /**
+     * Get RPM for a given distance using lookup table interpolation
+     * @param distanceIn Distance in inches
+     * @return Required RPM
+     */
+    private double getRpmForDistance(double distanceIn) {
+        double[][] t = DISTANCE_RPM_TABLE;
+        
+        // If distance is null or table is empty, return default
+        if (t == null || t.length == 0) return DEFAULT_RPM;
+        
+        // If distance is less than first entry, return first RPM
+        if (distanceIn <= t[0][0]) return t[0][1];
+        
+        // If distance is greater than last entry, return last RPM
+        if (distanceIn >= t[t.length - 1][0]) return t[t.length - 1][1];
+        
+        // Linear interpolation between two closest points
+        for (int i = 0; i < t.length - 1; i++) {
+            double d1 = t[i][0], r1 = t[i][1];
+            double d2 = t[i + 1][0], r2 = t[i + 1][1];
+            
+            if (distanceIn >= d1 && distanceIn <= d2) {
+                double ratio = (distanceIn - d1) / (d2 - d1);
+                return r1 + ratio * (r2 - r1);
+            }
+        }
+        
+        return DEFAULT_RPM;
+    }
+    
+    /**
+     * Get the distance to the closest AprilTag from Limelight
+     * @param result The LLResult from Limelight
+     * @return Distance in meters, or -1 if no valid target
+     */
+    private double getDistanceToTarget(LLResult result) {
+        if (result == null || !result.isValid()) {
+            return -1;
+        }
+        
+        // Method 1: Use 3D pose data (most accurate if you have AprilTag pipeline set up)
+        List<LLResultTypes.FiducialResult> fiducials = result.getFiducialResults();
+        if (fiducials != null && !fiducials.isEmpty()) {
+            // Get the closest fiducial
+            double minDistance = Double.MAX_VALUE;
+            
+            for (LLResultTypes.FiducialResult fiducial : fiducials) {
+                // Get the robot pose relative to this tag
+                Pose3D robotPose = fiducial.getRobotPoseTargetSpace();
+                if (robotPose != null) {
+                    // Calculate 3D distance
+                    double x = robotPose.getPosition().x;
+                    double y = robotPose.getPosition().y;
+                    double z = robotPose.getPosition().z;
+                    double distance = Math.sqrt(x*x + y*y + z*z);
+                    
+                    if (distance < minDistance) {
+                        minDistance = distance;
+                    }
+                }
+            }
+            
+            if (minDistance != Double.MAX_VALUE) {
+                return minDistance;
+            }
+        }
+        
+        // Method 2: Use target area (ta) to estimate distance (fallback)
+        double ta = result.getTa();
+        if (ta > 0) {
+            // Inverse relationship: larger area = closer distance
+            // This formula needs calibration based on your AprilTag size
+            double estimatedDistance = 100.0 / Math.sqrt(ta);
+            return estimatedDistance;
+        }
+        
+        return -1; // No valid distance found
+    }
+    
+    /**
+     * Drive forward or backward a specified distance in millimeters
+     * @param distanceMM Distance to drive (positive = forward, negative = backward)
+     * @param speed Motor power (0.0 to 1.0)
+     */
+    private void driveDistance(double distanceMM, double speed) {
+
+        // Calculate target encoder counts
+        int targetCounts = (int)(distanceMM * COUNTS_PER_MM);
+
+        // Get current positions
+        int startFL = fl.getCurrentPosition();
+        int startFR = fr.getCurrentPosition();
+        int startBL = bl.getCurrentPosition();
+        int startBR = br.getCurrentPosition();
+
+        // Set target positions
+        fl.setTargetPosition(startFL + targetCounts);
+        fr.setTargetPosition(startFR + targetCounts);
+        bl.setTargetPosition(startBL + targetCounts);
+        br.setTargetPosition(startBR + targetCounts);
+
+        // Switch to RUN_TO_POSITION mode
+        fl.setMode(DcMotor.RunMode.RUN_TO_POSITION);
+        fr.setMode(DcMotor.RunMode.RUN_TO_POSITION);
+        bl.setMode(DcMotor.RunMode.RUN_TO_POSITION);
+        br.setMode(DcMotor.RunMode.RUN_TO_POSITION);
+
+        // Set power
+        fl.setPower(Math.abs(speed));
+        fr.setPower(Math.abs(speed));
+        bl.setPower(Math.abs(speed));
+        br.setPower(Math.abs(speed));
+
+        // Wait until motors reach target
+        while (opModeIsActive() &&
+                (fl.isBusy() || fr.isBusy() || bl.isBusy() || br.isBusy())) {
+
+            // Update shooter control in background
+            updateShooter();
+
+            telemetry.addData("Driving", "Target: %d mm", (int)distanceMM);
+            telemetry.addData("FL Position", fl.getCurrentPosition());
+            telemetry.addData("FR Position", fr.getCurrentPosition());
+            telemetry.addData("BL Position", bl.getCurrentPosition());
+            telemetry.addData("BR Position", br.getCurrentPosition());
+            telemetry.update();
+        }
+
+        // Stop motors
+        stopDrive();
+
+        // Switch back to RUN_USING_ENCODER mode
+        fl.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+        fr.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+        bl.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+        br.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+    }
+    
+    /**
+     * Executes a sequence of shots, waiting for the shooter to spin up before each shot.
+     * @param numShots The number of rings to shoot.
+     */
+    private void shootSequence(int numShots) {
+        for (int i = 0; i < numShots; i++) {
+            fireSingleShot();
+        }
+    }
+
+    /**
+     * Spins up the shooter to the target velocity and fires a single shot.
+     * This function is blocking and will wait until the target velocity is reached.
+     * The shooter is turned off after the shot is complete.
+     */
+private void fireSingleShot() {
+
+    // Turn shooter on (do NOT turn off between shots)
+    setShooter(true);
+
+    // 1️⃣ Initial spin-up
+    while (opModeIsActive() &&
+            shooter.getVelocity() < SHOOTER_TARGET_VELOCITY) {
+
+        updateShooter();
+        telemetry.addData("Shooter", "Spinning up...");
+        telemetry.addData("Velocity", "%.0f", shooter.getVelocity());
+        telemetry.update();
+        sleep(20);
+    }
+
+    if (!opModeIsActive()) return;
+
+    // 2️⃣ Feed exactly ONE ring
+    telemetry.addData("Action", "Firing");
+    telemetry.update();
+
+    transfer.setPower(1.0);
+    intake.setPower(1.0);
+
+    sleep(300); // just long enough for one ring
+
+    transfer.setPower(0);
+    intake.setPower(0);
+
+    // 3️⃣ Wait for recovery (≥1 second AND velocity back)
+    waitForShooterRecovery();
+
+    telemetry.addData("Action", "Shot complete & recovered");
+    telemetry.update();
+}
+
+    /**
+     * Spins up the shooter to a specific velocity and fires a single shot.
+     * Used for distance-based shooting with auto-aim.
+     * @param targetVelocity The target shooter velocity in RPM
+     */
+    private void fireSingleShotWithVelocity(double targetVelocity) {
+        // Turn shooter on
+        setShooter(true);
+
+        // 1️⃣ Initial spin-up to target velocity
+        while (opModeIsActive() &&
+                shooter.getVelocity() < targetVelocity * 0.95) {
+
+            // Use bang-bang control for custom velocity
+            if (shooter.getVelocity() < targetVelocity) {
+                shooter.setPower(1.0);
+            } else {
+                shooter.setPower(0.5);
+            }
+
+            telemetry.addData("Shooter", "Spinning up...");
+            telemetry.addData("Target Velocity", "%.0f", targetVelocity);
+            telemetry.addData("Current Velocity", "%.0f", shooter.getVelocity());
+            telemetry.addData("Progress", "%.0f%%", (shooter.getVelocity() / targetVelocity) * 100);
+            telemetry.update();
+            sleep(20);
+        }
+
+        if (!opModeIsActive()) return;
+
+        // 2️⃣ Feed exactly ONE ring
+        telemetry.addData("Action", "Firing");
+        telemetry.update();
+
+        transfer.setPower(1.0);
+        intake.setPower(1.0);
+
+        sleep(200); // just long enough for one ring
+
+        transfer.setPower(0);
+        intake.setPower(0);
+
+        // 3️⃣ Wait for recovery
+        waitForShooterRecoveryWithVelocity(targetVelocity);
+
+        telemetry.addData("Action", "Shot complete & recovered");
+        telemetry.update();
+    }
+
+    private void waitForShooterRecovery() {
+        long recoveryStart = System.currentTimeMillis();
+
+        while (opModeIsActive()) {
+            updateShooter();
+
+            boolean timePassed =
+                    (System.currentTimeMillis() - recoveryStart) >= MIN_RECOVERY_TIME_MS;
+
+            boolean velocityRecovered =
+                    shooter.getVelocity() >=
+                            (SHOOTER_TARGET_VELOCITY - SHOOTER_VELOCITY_TOLERANCE);
+
+            telemetry.addData("Shooter", "Recovering...");
+            telemetry.addData("Velocity", "%.0f", shooter.getVelocity());
+            telemetry.update();
+
+            if (timePassed && velocityRecovered) {
+                break;
+            }
+
+            sleep(20);
+        }
+    }
+
+    /**
+     * Wait for shooter to recover to a specific velocity
+     * @param targetVelocity The target velocity to recover to
+     */
+    private void waitForShooterRecoveryWithVelocity(double targetVelocity) {
+        long recoveryStart = System.currentTimeMillis();
+
+        while (opModeIsActive()) {
+            // Use bang-bang control during recovery
+            if (shooter.getVelocity() < targetVelocity) {
+                shooter.setPower(1.0);
+            } else {
+                shooter.setPower(0.5);
+            }
+
+            boolean timePassed =
+                    (System.currentTimeMillis() - recoveryStart) >= MIN_RECOVERY_TIME_MS;
+
+            boolean velocityRecovered =
+                    shooter.getVelocity() >= (targetVelocity * 0.95);
+
+            telemetry.addData("Shooter", "Recovering...");
+            telemetry.addData("Target Velocity", "%.0f", targetVelocity);
+            telemetry.addData("Current Velocity", "%.0f", shooter.getVelocity());
+            telemetry.update();
+
+            if (timePassed && velocityRecovered) {
+                break;
+            }
+
+            sleep(20);
+        }
+    }
+    
+    
+private void fireSecondShot() {
+        // 1. Turn on the shooter flywheel (non-blocking)
+        setShooter(true);
+
+        // 2. Wait for shooter to reach target velocity
+        // The `updateShooter()` call inside the loop is crucial to maintain speed
+        while (opModeIsActive() && shooterEnabled && shooter.getVelocity() < SHOOTER_TARGET_VELOCITY) {
+            updateShooter();
+            telemetry.addData("Action", "Waiting for shooter...");
+            telemetry.addData("Shooter Velocity", "%.0f / %d", shooter.getVelocity(), SHOOTER_TARGET_VELOCITY);
+            telemetry.update();
+            sleep(2000);
+        }
+
+        // Check if opMode is still active before shooting
+        if (!opModeIsActive()) return;
+
+        telemetry.addData("Action", "Shooting...");
+        telemetry.update();
+
+        // 3. Execute the shot sequence (release hold, run transfer/intake)
+        //hold.setPosition(0); // Release hold
+        transfer.setPower(1);
+        intake.setPower(1.0);
+
+        // 4. Wait for the ring to be shot (e.g., 1000ms for longer transfer)
+        long shotStartTime = System.currentTimeMillis();
+        while (opModeIsActive() && (System.currentTimeMillis() - shotStartTime) < 1200) {
+            updateShooter(); // Keep the flywheel running
+            sleep(3500);
+        }
+
+        // 5. Reset to hold position and stop transfer/intake
+        // hold.setPosition(0);
+        transfer.setPower(0);
+        intake.setPower(0);
+        setShooter(false);
+
+        
+
+        // NOTE: Shooter is intentionally NOT turned off here. 
+        // It is assumed the main OpMode will call setShooter(false) when all shots are complete.
+
+        telemetry.addData("Action", "Shot complete");
+        telemetry.update();
+    }
+
+    /**
+     * Strafe left or right a specified distance in millimeters
+     * @param distanceMM Distance to strafe (positive = right, negative = left)
+     * @param speed Motor power (0.0 to 1.0)
+     */
+    private void strafeDistance(double distanceMM, double speed) {
+
+        // Calculate target encoder counts
+        // Note: Strafing typically requires more encoder counts due to wheel slippage
+        // You may need to adjust this multiplier based on testing
+        int targetCounts = (int)(distanceMM * COUNTS_PER_MM * 1.1);  // 1.1 is a correction factor
+
+        // Get current positions
+        int startFL = fl.getCurrentPosition();
+        int startFR = fr.getCurrentPosition();
+        int startBL = bl.getCurrentPosition();
+        int startBR = br.getCurrentPosition();
+
+        // Set target positions for strafing
+        // For right strafe: FL+, FR-, BL-, BR+
+        fl.setTargetPosition(startFL + targetCounts);
+        fr.setTargetPosition(startFR - targetCounts);
+        bl.setTargetPosition(startBL - targetCounts);
+        br.setTargetPosition(startBR + targetCounts);
+
+        // Switch to RUN_TO_POSITION mode
+        fl.setMode(DcMotor.RunMode.RUN_TO_POSITION);
+        fr.setMode(DcMotor.RunMode.RUN_TO_POSITION);
+        bl.setMode(DcMotor.RunMode.RUN_TO_POSITION);
+        br.setMode(DcMotor.RunMode.RUN_TO_POSITION);
+
+        // Set power
+        fl.setPower(Math.abs(speed));
+        fr.setPower(Math.abs(speed));
+        bl.setPower(Math.abs(speed));
+        br.setPower(Math.abs(speed));
+
+        // Wait until motors reach target
+        while (opModeIsActive() &&
+                (fl.isBusy() || fr.isBusy() || bl.isBusy() || br.isBusy())) {
+
+            // Update shooter control in background
+            updateShooter();
+
+            telemetry.addData("Strafing", "Target: %d mm", (int)distanceMM);
+            telemetry.addData("FL Position", fl.getCurrentPosition());
+            telemetry.addData("FR Position", fr.getCurrentPosition());
+            telemetry.addData("BL Position", bl.getCurrentPosition());
+            telemetry.addData("BR Position", br.getCurrentPosition());
+            telemetry.addData("Shooter Position", shooter.getCurrentPosition());
+
+            telemetry.update();
+        }
+
+        // Stop motors
+        stopDrive();
+
+        // Switch back to RUN_USING_ENCODER mode
+        fl.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+        fr.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+        bl.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+        br.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+    }
+
+    /**
+     * Rotate to a specific angle using the IMU
+     * @param targetAngle Target angle in degrees (positive = counterclockwise, negative = clockwise)
+     */
+   /* private void rotateTo(double targetAngle) {
+
+        // Get current heading
+        YawPitchRollAngles orientation = imu.getRobotYawPitchRollAngles();
+        double currentHeading = orientation.getYaw(AngleUnit.DEGREES);
+
+        // Calculate the error
+        double error = targetAngle - currentHeading;
+
+        // Normalize error to -180 to 180 degrees
+        while (error > 180) error -= 360;
+        while (error < -180) error += 360;
+
+        // Rotate until we reach the target
+        while (opModeIsActive() && Math.abs(error) > HEADING_THRESHOLD) {
+
+            // Update shooter control in background
+            updateShooter();
+
+            // Update current heading
+            orientation = imu.getRobotYawPitchRollAngles();
+            currentHeading = orientation.getYaw(AngleUnit.DEGREES);
+
+            // Recalculate error
+            error = targetAngle - currentHeading;
+            while (error > 180) error -= 360;
+            while (error < -180) error += 360;
+
+            // Calculate power based on error (proportional control)
+            double power = error * 0.01;  // P-gain
+            power = Math.max(-TURN_SPEED, Math.min(TURN_SPEED, power));  // Clamp power
+
+            // Apply minimum power to overcome static friction
+            if (Math.abs(power) < 0.05 && Math.abs(error) > HEADING_THRESHOLD) {
+                power = Math.signum(power) * 0.05;
+            }
+
+            // Set motor powers for rotation (reversed to fix error direction)
+            fl.setPower(-power);
+            fr.setPower(power);
+            bl.setPower(-power);
+            br.setPower(power);
+
+            telemetry.addData("Rotating", "Target: %.1f°", targetAngle);
+            telemetry.addData("Current Heading", "%.1f°", currentHeading);
+            telemetry.addData("Error", "%.1f°", error);
+            telemetry.addData("Power", "%.2f", power);
+            telemetry.update();
+        }
+
+        // Stop motors
+        stopDrive();
+    }
+*/
+
+private void turnDegrees(double degrees, double speed) {
+    // Calculate target encoder counts for the turn
+    int targetCounts = (int)(degrees * COUNTS_PER_DEGREE);
+
+    // Get current positions
+    int startFL = fl.getCurrentPosition();
+    int startFR = fr.getCurrentPosition();
+    int startBL = bl.getCurrentPosition();
+    int startBR = br.getCurrentPosition();
+    int startShooter = shooter.getCurrentPosition();
+
+    // Set target positions for turning
+    // Right turn: left wheels forward, right wheels backward
+    fl.setTargetPosition(startFL - targetCounts);
+    fr.setTargetPosition(startFR + targetCounts);
+    bl.setTargetPosition(startBL - targetCounts);
+    br.setTargetPosition(startBR + targetCounts);
+
+    // Switch to RUN_TO_POSITION mode
+    fl.setMode(DcMotor.RunMode.RUN_TO_POSITION);
+    fr.setMode(DcMotor.RunMode.RUN_TO_POSITION);
+    bl.setMode(DcMotor.RunMode.RUN_TO_POSITION);
+    br.setMode(DcMotor.RunMode.RUN_TO_POSITION);
+
+    // Set power
+    fl.setPower(Math.abs(speed));
+    fr.setPower(Math.abs(speed));
+    bl.setPower(Math.abs(speed));
+    br.setPower(Math.abs(speed));
+
+    // Wait until motors reach target
+    while (opModeIsActive() &&
+            (fl.isBusy() || fr.isBusy() || bl.isBusy() || br.isBusy())) {
+
+        // Keep shooter running in background
+        updateShooter();
+
+        telemetry.addData("Turning", "Target: %.1f degrees", degrees);
+        telemetry.addData("FL", fl.getCurrentPosition());
+        telemetry.addData("FR", fr.getCurrentPosition());
+        telemetry.addData("BL", bl.getCurrentPosition());
+        telemetry.addData("BR", br.getCurrentPosition());
+        telemetry.update();
+    }
+
+    // Stop motors
+    stopDrive();
+
+    // Switch back to RUN_USING_ENCODER mode
+    fl.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+    fr.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+    bl.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+    br.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+}
+    /**
+     * Turn intake on or off
+     * @param on True to turn on, false to turn off
+     */
+    private void setIntake(boolean on) {
+        if (on) {
+            intake.setPower(-1.0);
+            transfer.setPower(1.0);
+        } else {
+            intake.setPower(0);
+            transfer.setPower(0);
+            telemetry.addData("Intake", "OFF");
+        }
+        telemetry.update();
+    }
+
+    /**
+     * Turn shooter on or off (non-blocking)
+     * @param on True to enable shooter, false to disable
+     */
+    private void setShooter(boolean on) {
+        shooterEnabled = on;
+        if (!on) {
+            shooter.setPower(0);
+            telemetry.addData("Shooter", "OFF");
+            telemetry.update();
+        }
+        // If on, updateShooter() will handle the control loop
+    }
+
+    /**
+     * Update shooter power based on velocity (bang-bang control)
+     * Call this continuously during autonomous to maintain shooter speed
+     */
+    private void updateShooter() {
+        if (shooterEnabled) {
+            double currentVelocity = shooter.getVelocity();
+
+            // Bang-bang control: full power if below target, reduced power if at/above target
+            if (currentVelocity < SHOOTER_TARGET_VELOCITY) {
+                shooter.setPower(1.0);
+            } else {
+                shooter.setPower(0.55);
+            }
+        }
+    }
+
+    /**
+     * Execute a shot (waits for shooter to be ready if needed)
+     */
+    private void shoot() {
+        // Wait for shooter to reach target velocity
+        //hold.setPosition(0.82);
+        while (opModeIsActive() && shooterEnabled && shooter.getVelocity() < SHOOTER_TARGET_VELOCITY) {
+            updateShooter();
+            telemetry.addData("Action", "Waiting for shooter...");
+            telemetry.addData("Shooter Velocity", "%.0f / %d", shooter.getVelocity(), SHOOTER_TARGET_VELOCITY);
+            telemetry.update();
+            sleep(50);
+        }
+
+        telemetry.addData("Action", "Shooting...");
+        telemetry.update();
+
+        // Release hold servo and run transfer
+        hold.setPosition(0.82);
+        transfer.setPower(0.75);
+        intake.setPower(-1.0);
+
+        // Wait for shot to complete, continue updating shooter
+        long shotStartTime = System.currentTimeMillis();
+        while (opModeIsActive() && (System.currentTimeMillis() - shotStartTime) < 2000) {
+            updateShooter();
+            sleep(50);
+        }
+
+        // Reset to hold position
+        //hold.setPosition(1);
+        transfer.setPower(0);
+        intake.setPower(0);
+
+        telemetry.addData("Action", "Shot complete");
+        telemetry.update();
+    }
+
+    /**
+     * Check if shooter is at target velocity
+     * @return true if shooter is ready to shoot
+     */
+    private boolean isShooterReady() {
+        return shooterEnabled && shooter.getVelocity() >= SHOOTER_TARGET_VELOCITY;
+    }
+
+    /**
+     * Stop all drive motors
+     */
+    private void stopDrive() {
+        fl.setPower(0);
+        fr.setPower(0);
+        bl.setPower(0);
+        br.setPower(0);
+    }
+
+    /**
+     * Sleep while continuing to update shooter control
+     * @param milliseconds Time to sleep in milliseconds
+     */
+    private void sleepWithShooter(long milliseconds) {
+        long startTime = System.currentTimeMillis();
+        while (opModeIsActive() && (System.currentTimeMillis() - startTime) < milliseconds) {
+            updateShooter();
+            sleep(50);
+        }
+    }
+
+    /**
+     * Select alliance color before start
+     * Press X for Blue Alliance, B for Red Alliance
+     */
+    private void selectAlliance() {
+        telemetry.addData("===== ALLIANCE SELECTION =====", "");
+        telemetry.addData("Press X", "Blue Alliance");
+        telemetry.addData("Press B", "Red Alliance");
+        telemetry.addData("", "");
+        telemetry.addData("Current Selection", isRedAlliance ? "RED" : "BLUE");
+        telemetry.update();
+
+        // Wait for alliance selection
+        while (!opModeIsActive() && !isStopRequested()) {
+            if (gamepad1.x) {
+                isRedAlliance = false;
+                allianceMultiplier = -1;
+                telemetry.addData("===== ALLIANCE SELECTION =====", "");
+                telemetry.addData("Press X", "Blue Alliance");
+                telemetry.addData("Press B", "Red Alliance");
+                telemetry.addData("", "");
+                telemetry.addData("Current Selection", "BLUE");
+                telemetry.update();
+                sleep(200);  // Debounce
+            } else if (gamepad1.b) {
+                isRedAlliance = true;
+                allianceMultiplier = 1;
+                telemetry.addData("===== ALLIANCE SELECTION =====", "");
+                telemetry.addData("Press X", "Blue Alliance");
+                telemetry.addData("Press B", "Red Alliance");
+                telemetry.addData("", "");
+                telemetry.addData("Current Selection", "RED");
+                telemetry.update();
+                sleep(200);  // Debounce
+            }
+        }
+
+        telemetry.addData("Alliance Selected", isRedAlliance ? "RED" : "BLUE");
+        telemetry.addData("Path will be", isRedAlliance ? "Normal" : "Mirrored");
+        telemetry.update();
+    }
+}
