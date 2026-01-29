@@ -1,0 +1,477 @@
+package org.firstinspires.ftc.teamcode.Teleop;
+
+import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
+import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
+import com.qualcomm.robotcore.hardware.DcMotor;
+import com.qualcomm.robotcore.hardware.DcMotorEx;
+import com.qualcomm.robotcore.hardware.Servo;
+import com.qualcomm.robotcore.hardware.PIDFCoefficients;
+import com.qualcomm.robotcore.util.ElapsedTime;
+
+// Limelight imports
+import com.qualcomm.hardware.limelightvision.LLResult;
+import com.qualcomm.hardware.limelightvision.LLResultTypes;
+import com.qualcomm.hardware.limelightvision.Limelight3A;
+import org.firstinspires.ftc.robotcore.external.navigation.Pose3D;
+
+// Additional imports
+import java.util.List;
+
+@TeleOp(name = "ITKAN_V3_Final", group = "Competition")
+public class ITKAN_V3_Final extends LinearOpMode {
+
+    private ElapsedTime runtime = new ElapsedTime();
+    private DcMotor fl = null;
+    private DcMotor bl = null;
+    private DcMotor fr = null;
+    private DcMotor br = null;
+    
+    // Other motors
+    private DcMotor intake = null;
+    private DcMotorEx shooter = null;
+    private DcMotor transfer = null;
+   
+    // Servos
+    Servo hold;
+    
+    // Limelight camera
+    private Limelight3A limelight;
+
+    // --- State Variables ---
+    boolean shooterReady = false;
+    
+    // Auto-shoot state machine
+    enum ShootState {
+        IDLE,           // Not shooting
+        SPINNING_UP,    // Shooter ramping up to target velocity
+        SHOOTING,       // Actively shooting (transfer running)
+        COOLDOWN        // Brief cooldown after shot
+    }
+    ShootState shootState = ShootState.IDLE;
+    ElapsedTime shootTimer = new ElapsedTime();
+    
+    // Button press detection
+    boolean lastRightBumper = false;
+    
+    // --- Toggle Variables ---
+    boolean autoAlignEnabled = false;
+    boolean lastRightStickButton = false;
+    
+    // Manual shot velocities (backup for A and X buttons)
+    final double closeShotVelocity = 1000;
+    final double mediumShotVelocity = 1500;
+    final double farShotVelocity = 2300;
+    
+    final double VELOCITY_TOLERANCE_PERCENT = 0.95;
+    final double HOLD_POSITION_SHOOT = 0;
+    final double HOLD_POSITION_IDLE = 0.65;
+    
+    // Auto-shoot timing constants
+    final double SHOOT_DURATION = 2;      // How long to run transfer motor (seconds)
+    final double COOLDOWN_DURATION = 0.3;   // Cooldown time after shooting (seconds)
+
+    // Auto-alignment parameters
+    private static final double ALIGNMENT_RANGE = 30.0;
+    private static final double ALIGNMENT_TOLERANCE = 1.0;
+    private static final double MIN_ROTATION_POWER = 0.1;
+    private static final double MAX_ROTATION_POWER = 0.4;
+    private static final double Kp = 0.03;
+
+    // Distance-to-RPM lookup table (from your code)
+    // Format: {distance_in_inches, rpm}
+    public static final double[][] DISTANCE_RPM_TABLE = {
+        {40, 1000},
+        {50, 1200},
+        {70, 1500},
+        {100, 1900},
+        {120, 2200}
+    };
+    
+    public static final double DEFAULT_RPM = 2430.0;
+
+
+    @Override
+    public void runOpMode() {
+
+        telemetry.addData("Status", "Initializing...");
+        telemetry.update();
+
+        // --- HARDWARE MAPPING ---
+        fl = hardwareMap.get(DcMotor.class, "fl");
+        fr = hardwareMap.get(DcMotor.class, "fr");
+        bl = hardwareMap.get(DcMotor.class, "bl");
+        br = hardwareMap.get(DcMotor.class, "br");
+
+        intake = hardwareMap.get(DcMotor.class, "intake"); 
+        shooter = hardwareMap.get(DcMotorEx.class, "shooter");
+        transfer = hardwareMap.get(DcMotor.class, "transfer");
+
+        hold = hardwareMap.get(Servo.class, "hold");
+        telemetry.setMsTransmissionInterval(5);
+        shooter.setPower(0);
+        
+        // Initialize Limelight
+        limelight = hardwareMap.get(Limelight3A.class, "limelight");
+        limelight.setPollRateHz(100);
+        limelight.pipelineSwitch(0);
+        limelight.start();
+
+        // --- MOTOR DIRECTION ---
+        fl.setDirection(DcMotor.Direction.FORWARD);
+        bl.setDirection(DcMotor.Direction.FORWARD);
+        fr.setDirection(DcMotor.Direction.REVERSE);
+        br.setDirection(DcMotor.Direction.REVERSE);
+        
+        intake.setDirection(DcMotor.Direction.FORWARD);
+        transfer.setDirection(DcMotor.Direction.FORWARD);
+        shooter.setDirection(DcMotorEx.Direction.FORWARD);
+
+        // --- MOTOR BEHAVIORS ---
+        fl.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        fr.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        bl.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        br.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        
+        transfer.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        intake.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.FLOAT);
+        shooter.setZeroPowerBehavior(DcMotorEx.ZeroPowerBehavior.BRAKE);
+        
+        // --- MOTOR MODES ---
+        fl.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
+        fr.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
+        bl.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
+        br.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
+
+        intake.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
+        transfer.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
+        
+        shooter.setMode(DcMotorEx.RunMode.RUN_USING_ENCODER);
+
+        while (!opModeIsActive()) {
+            telemetry.addData("Status", "Initialized. Ready to run!");
+            telemetry.addData("Auto-Shoot", "Press Right Bumper once to shoot!");
+            telemetry.addData("Auto-Align", "Press Right Stick (R3) to toggle!");
+            telemetry.update();
+        }
+        waitForStart();
+
+        runtime.reset();
+
+        while (opModeIsActive()) {
+
+            // --- TOGGLE LOGIC FOR AUTO-ALIGN ---
+            boolean currentRightStickButton = gamepad1.right_stick_button || gamepad2.right_stick_button;
+            if (currentRightStickButton && !lastRightStickButton) {
+                autoAlignEnabled = !autoAlignEnabled; // Toggle state
+            }
+            lastRightStickButton = currentRightStickButton;
+
+            // --- DRIVE CODE WITH AUTO-ALIGNMENT ---
+            double y = -gamepad1.left_stick_y;
+            double x = gamepad1.left_stick_x;
+            double rx = -gamepad1.right_stick_x;
+
+            // Get Limelight results for auto-alignment
+            LLResult result = limelight.getLatestResult();
+            
+            boolean autoAligning = false;
+            
+            // Check if we should auto-align (REQUIRES TOGGLE TO BE ON)
+            if (autoAlignEnabled && result != null && result.isValid()) {
+                double tx = result.getTx();
+                
+                // Auto-align if target is within range and driver isn't manually rotating
+                if (Math.abs(tx) < ALIGNMENT_RANGE && Math.abs(rx) < 0.5) {
+                    autoAligning = true;
+                    
+                    // Calculate rotation correction using proportional control
+                    double rotationCorrection = -tx * Kp;
+                    
+                    // Apply minimum power to overcome friction if not aligned
+                    if (Math.abs(tx) > ALIGNMENT_TOLERANCE) {
+                        if (rotationCorrection > 0) {
+                            rotationCorrection = Math.max(rotationCorrection, MIN_ROTATION_POWER);
+                        } else {
+                            rotationCorrection = Math.min(rotationCorrection, -MIN_ROTATION_POWER);
+                        }
+                    } else {
+                        rotationCorrection = 0;
+                    }
+                    
+                    // Limit maximum rotation power
+                    rotationCorrection = Math.max(-MAX_ROTATION_POWER, 
+                                                  Math.min(MAX_ROTATION_POWER, rotationCorrection));
+                    
+                    // Override manual rotation with auto-alignment
+                    rx = rotationCorrection;
+                    
+                    telemetry.addData("--- Auto-Align ---", "");
+                    telemetry.addData("Status", "ACTIVE (TOGGLED ON)");
+                    telemetry.addData("Target X (tx)", "%.2f°", tx);
+                    telemetry.addData("Rotation Power", "%.3f", rx);
+                    
+                    if (Math.abs(tx) <= ALIGNMENT_TOLERANCE) {
+                        telemetry.addData("Alignment", "LOCKED!");
+                    }
+                }
+            }
+            
+            // Calculate mecanum drive motor powers
+            double flPower = y + x + rx;
+            double blPower = y - x + rx;
+            double frPower = y - x - rx;
+            double brPower = y + x - rx;
+
+            double max = Math.max(Math.max(Math.abs(flPower), Math.abs(frPower)),
+                    Math.max(Math.abs(blPower), Math.abs(brPower)));
+            if (max > 1.0) {
+                flPower /= (max * .8);
+                blPower /= (max * .8);
+                frPower /= (max * .8);
+                brPower /= (max * .8);
+            }
+
+            fl.setPower(flPower * 1);
+            bl.setPower(blPower * 1);
+            fr.setPower(frPower * 1);
+            br.setPower(brPower * 1);
+            // --- END DRIVE CODE ---
+            
+            // --- AUTOMATIC SHOOTING STATE MACHINE ---
+            boolean currentRightBumper = gamepad1.right_bumper || gamepad2.right_bumper;
+            
+            // Detect button press (rising edge)
+            if (currentRightBumper && !lastRightBumper && shootState == ShootState.IDLE) {
+                // Start auto-shoot sequence
+                shootState = ShootState.SPINNING_UP;
+                shootTimer.reset();
+            }
+            lastRightBumper = currentRightBumper;
+            
+            // Get distance for velocity calculation
+            LLResult limelightResult = limelight.getLatestResult();
+            double targetDistanceMeters = getDistanceToTarget(limelightResult);
+            double targetDistanceInches = targetDistanceMeters * 39.3701; // Convert meters to inches
+            double targetVelocity = 0;
+            
+            if (targetDistanceMeters > 0) {
+                targetVelocity = getRpmForDistance(targetDistanceInches);
+            } else {
+                targetVelocity = DEFAULT_RPM; // Default if no target
+            }
+            
+            double currentVelocity = shooter.getVelocity();
+            
+            // State machine logic
+            switch (shootState) {
+                case IDLE:
+                    // Not shooting - check for manual buttons
+                    if (gamepad1.x || gamepad2.x) {
+                        // Medium shot (manual)
+                        if (currentVelocity >= mediumShotVelocity) {
+                            shooter.setPower(0.5);
+                        } else {
+                            shooter.setPower(1.0);
+                        }
+                        telemetry.addData("--- Shooter (Manual Medium) ---", "");
+                        telemetry.addData("Target Velocity", "%.0f", mediumShotVelocity);
+                        telemetry.addData("Current Velocity", "%.0f", currentVelocity);
+                        
+                    } else if (gamepad1.a || gamepad2.a) {
+                        // Close shot (manual)
+                        if (currentVelocity >= closeShotVelocity) {
+                            shooter.setPower(0.5);
+                        } else {
+                            shooter.setPower(1.0);
+                        }
+                        telemetry.addData("--- Shooter (Manual Close) ---", "");
+                        telemetry.addData("Target Velocity", "%.0f", closeShotVelocity);
+                        telemetry.addData("Current Velocity", "%.0f", currentVelocity);
+                        
+                    } else {
+                        shooter.setPower(0);
+                        telemetry.addData("--- Auto-Shoot ---", "Ready");
+                        telemetry.addData("Instruction", "Press Right Bumper to shoot!");
+                    }
+                    break;
+                    
+                case SPINNING_UP:
+                    // Spin up shooter to target velocity
+                    if (currentVelocity >= targetVelocity * 0.95) {
+                        shooter.setPower(0.5);
+                    } else {
+                        shooter.setPower(1.0);
+                    }
+                    
+                    telemetry.addData("--- Auto-Shoot ---", "SPINNING UP");
+                    if (targetDistanceMeters > 0) {
+                        telemetry.addData("Distance", "%.1f in (%.2f m)", targetDistanceInches, targetDistanceMeters);
+                    } else {
+                        telemetry.addData("Distance", "No target (using default)");
+                    }
+                    telemetry.addData("Target RPM", "%.0f", targetVelocity);
+                    telemetry.addData("Current RPM", "%.0f", currentVelocity);
+                    telemetry.addData("Progress", "%.0f%%", (currentVelocity / targetVelocity) * 100);
+                    
+                    // Check if ready to shoot
+                    if (currentVelocity >= targetVelocity * VELOCITY_TOLERANCE_PERCENT) {
+                        shootState = ShootState.SHOOTING;
+                        shootTimer.reset();
+                        hold.setPosition(HOLD_POSITION_SHOOT); // Open servo (position 0)
+                    }
+                    break;
+                    
+                case SHOOTING:
+                    // Maintain shooter velocity and run transfer
+                    shooter.setPower(1.0);  // Keep shooter at full power during shooting
+                    transfer.setPower(1.0);  // Feed the shooter
+                    intake.setPower(1.0);    // Push from intake
+                    
+                    telemetry.addData("--- Auto-Shoot ---", "SHOOTING!");
+                    telemetry.addData("Time Remaining", "%.1f s", SHOOT_DURATION - shootTimer.seconds());
+                    
+                    // Check if shooting duration is complete
+                    if (shootTimer.seconds() >= SHOOT_DURATION) {
+                        shootState = ShootState.COOLDOWN;
+                        shootTimer.reset();
+                        hold.setPosition(HOLD_POSITION_IDLE); // Close servo (position 0.65)
+                    }
+                    break;
+                    
+                case COOLDOWN:
+                    // Brief cooldown before returning to idle
+                    shooter.setPower(0);
+                    transfer.setPower(0);
+                    intake.setPower(0);
+                    
+                    telemetry.addData("--- Auto-Shoot ---", "Cooldown");
+                    telemetry.addData("Time Remaining", "%.1f s", COOLDOWN_DURATION - shootTimer.seconds());
+                    
+                    if (shootTimer.seconds() >= COOLDOWN_DURATION) {
+                        shootState = ShootState.IDLE;
+                    }
+                    break;
+            }
+
+            // Servo controls (manual override)
+            if (gamepad1.b) {
+                hold.setPosition(.6);
+            }
+            if (gamepad1.y) {
+                hold.setPosition(0);
+            }
+
+            // --- MANUAL INTAKE AND TRANSFER CONTROL (only when not auto-shooting) ---
+            if (shootState == ShootState.IDLE) {
+                double transferP = 0.0;
+                double intakeP = 0.0;
+
+                if (gamepad1.right_trigger > 0.1) {
+                    // Intake (In)
+                    intakeP = -1.0;     
+                    transferP = -1.0;    
+                } else if (gamepad1.left_trigger > 0.1) {
+                    // Outtake (Out)
+                    intakeP = 1.0;      
+                    transferP = 1.0;   
+                }
+
+                transfer.setPower(transferP); 
+                intake.setPower(intakeP);
+            }
+
+            // --- TELEMETRY ---
+            telemetry.addData("Status", "Running");
+            telemetry.addData("Auto-Align Toggle", autoAlignEnabled ? "ON (R3 to Disable)" : "OFF (R3 to Enable)");
+            if (!autoAligning && autoAlignEnabled) {
+                telemetry.addData("--- Auto-Align ---", "Searching for target...");
+            }
+
+            telemetry.update();
+        }
+        
+        // Stop Limelight when done
+        limelight.stop();
+    }
+
+    /**
+     * Get RPM for a given distance using lookup table interpolation
+     * This is your method from the image
+     * @param distanceIn Distance in inches
+     * @return Required RPM
+     */
+    private double getRpmForDistance(double distanceIn) {
+        double[][] t = DISTANCE_RPM_TABLE;
+        
+        // If distance is null or table is empty, return default
+        if (t == null || t.length == 0) return DEFAULT_RPM;
+        
+        // If distance is less than first entry, return first RPM
+        if (distanceIn <= t[0][0]) return t[0][1];
+        
+        // If distance is greater than last entry, return last RPM
+        if (distanceIn >= t[t.length - 1][0]) return t[t.length - 1][1];
+        
+        // Linear interpolation between two closest points
+        for (int i = 0; i < t.length - 1; i++) {
+            double d1 = t[i][0], r1 = t[i][1];
+            double d2 = t[i + 1][0], r2 = t[i + 1][1];
+            
+            if (distanceIn >= d1 && distanceIn <= d2) {
+                double ratio = (distanceIn - d1) / (d2 - d1);
+                return r1 + ratio * (r2 - r1);
+            }
+        }
+        
+        return DEFAULT_RPM;
+    }
+
+    /**
+     * Get the distance to the closest AprilTag from Limelight
+     * @param result The LLResult from Limelight
+     * @return Distance in meters, or -1 if no valid target
+     */
+    private double getDistanceToTarget(LLResult result) {
+        if (result == null || !result.isValid()) {
+            return -1;
+        }
+        
+        // Method 1: Use 3D pose data (most accurate if you have AprilTag pipeline set up)
+        List<LLResultTypes.FiducialResult> fiducials = result.getFiducialResults();
+        if (fiducials != null && !fiducials.isEmpty()) {
+            // Get the closest fiducial
+            double minDistance = Double.MAX_VALUE;
+            
+            for (LLResultTypes.FiducialResult fiducial : fiducials) {
+                // Get the robot pose relative to this tag
+                Pose3D robotPose = fiducial.getRobotPoseTargetSpace();
+                if (robotPose != null) {
+                    // Calculate 3D distance
+                    double x = robotPose.getPosition().x;
+                    double y = robotPose.getPosition().y;
+                    double z = robotPose.getPosition().z;
+                    double distance = Math.sqrt(x*x + y*y + z*z);
+                    
+                    if (distance < minDistance) {
+                        minDistance = distance;
+                    }
+                }
+            }
+            
+            if (minDistance != Double.MAX_VALUE) {
+                return minDistance;
+            }
+        }
+        
+        // Method 2: Use target area (ta) to estimate distance (fallback)
+        double ta = result.getTa();
+        if (ta > 0) {
+            // Inverse relationship: larger area = closer distance
+            // This formula needs calibration based on your AprilTag size
+            double estimatedDistance = 100.0 / Math.sqrt(ta);
+            return estimatedDistance;
+        }
+        
+        return -1; // No valid distance found
+    }
+}
